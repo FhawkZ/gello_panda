@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+
+# Calibration output (keep the .example.json template only)
+configs/*.json
+!configs/*.example.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
