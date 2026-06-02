@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
+
+import numpy as np
 
 
 @dataclass
@@ -22,7 +24,9 @@ class LeaderCalibration:
         joint_ids: Arm servo IDs in bus order, NOT including the gripper.
         joint_offsets: One offset (rad) per arm joint, from calibration.
         joint_signs: One sign (+1 / -1) per arm joint.
-        gripper: Optional (servo_id, open_deg, close_deg). If None, no gripper.
+        gripper: Optional (servo_id, open_deg, close_deg). open/close 为夹爪舵机
+            在「完全张开 / 完全闭合」时读到的角度（度），用于线性映射到 [0, 1]。
+            由标定脚本交互记录，勿手填。
         baudrate: Bus baudrate (GELLO default 57600).
     """
 
@@ -48,6 +52,17 @@ class LeaderCalibration:
     def has_gripper(self) -> bool:
         return self.gripper is not None
 
+    def validate_gripper_range(self) -> None:
+        """Ensure open/close endpoints differ enough for mapping."""
+        if self.gripper is None:
+            return
+        open_deg, close_deg = float(self.gripper[1]), float(self.gripper[2])
+        if abs(open_deg - close_deg) < 0.5:
+            raise ValueError(
+                f"gripper open/close too close ({open_deg:.3f} vs {close_deg:.3f} deg); "
+                "re-run gripper calibration."
+            )
+
     def all_ids(self) -> List[int]:
         """Servo IDs including the gripper (if any), in read order."""
         if self.gripper is None:
@@ -69,7 +84,7 @@ class LeaderCalibration:
         gripper = data.get("gripper")
         if gripper is not None:
             gripper = (int(gripper[0]), float(gripper[1]), float(gripper[2]))
-        return cls(
+        calib = cls(
             port=data["port"],
             joint_ids=list(data["joint_ids"]),
             joint_offsets=[float(x) for x in data["joint_offsets"]],
@@ -77,3 +92,48 @@ class LeaderCalibration:
             gripper=gripper,
             baudrate=int(data.get("baudrate", 57600)),
         )
+        calib.validate_gripper_range()
+        return calib
+
+
+def read_gripper_servo_deg(
+    get_joints: Callable[[], np.ndarray],
+    gripper_index: int = -1,
+    warmup_reads: int = 5,
+) -> float:
+    """Read the gripper servo angle (degrees) after a few warmup polls."""
+    for _ in range(warmup_reads):
+        get_joints()
+    return float(np.rad2deg(get_joints()[gripper_index]))
+
+
+def calibrate_gripper_range_interactive(
+    get_joints: Callable[[], np.ndarray],
+    *,
+    gripper_index: int = -1,
+    min_span_deg: float = 1.0,
+) -> Tuple[float, float]:
+    """Record gripper open/close endpoints by hand; Enter confirms each pose.
+
+    Returns:
+        (open_deg, close_deg) mapping to gripper_01 = 0 (open) and 1 (closed).
+    """
+    print("\n=== 夹爪行程标定 ===")
+    print("将 GELLO 夹爪完全张开，按回车记录「张开」端点 …")
+    input()
+    open_deg = read_gripper_servo_deg(get_joints, gripper_index)
+    print(f"  已记录张开: {open_deg:.3f} deg")
+
+    print("将 GELLO 夹爪完全闭合，按回车记录「闭合」端点 …")
+    input()
+    close_deg = read_gripper_servo_deg(get_joints, gripper_index)
+    print(f"  已记录闭合: {close_deg:.3f} deg")
+
+    span = abs(close_deg - open_deg)
+    if span < min_span_deg:
+        raise ValueError(
+            f"张开/闭合角度过近（相差 {span:.3f} deg < {min_span_deg} deg），请重新标定。"
+        )
+
+    print(f"  行程: {span:.3f} deg  →  映射 gripper_01: 0=张开, 1=闭合")
+    return open_deg, close_deg

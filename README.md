@@ -29,7 +29,8 @@ panda_leader/
 │   ├── calibrate.py          # 标定：检测 joint_offsets / 夹爪开合角
 │   └── read_leader.py        # 验证：循环打印处理后的关节角
 ├── examples/
-│   └── teleop_panda.py       # read → 处理 → 发送 Panda（接口为待填桩）
+│   ├── teleop_panda.py            # read → 处理 → 发送 Panda（接口为待填桩）
+│   └── teleop_panda_ros1_moveit.py # read → ROS1/MoveIt → 控制 Franka（开箱即用）
 └── configs/
     └── panda_calib.example.json
 ```
@@ -62,6 +63,20 @@ python scripts/calibrate.py --port /dev/ttyUSB0 \
 
 结果会写入 `configs/panda_calib.json`。无夹爪用 `--no-gripper`。
 
+**夹爪行程标定**（启用 `--gripper` 时自动进行）：
+
+1. 臂关节 offset 检测完成后，提示将夹爪**完全张开**，按回车记录 `open_deg`（映射为 `gripper_01 = 0`）；
+2. 再提示**完全闭合**，按回车记录 `close_deg`（映射为 `gripper_01 = 1`）。
+
+仅重标夹爪、保留已有臂标定：
+
+```bash
+python scripts/calibrate.py --port /dev/ttyUSB0 \
+  --gripper-only --calib configs/panda_calib.json
+```
+
+JSON 中 `gripper` 字段为 `[舵机ID, 张开角度deg, 闭合角度deg]`，运行时线性映射到 `[0, 1]`。
+
 ### 3. 验证读取
 
 ```bash
@@ -86,6 +101,49 @@ robot.command_gripper(gripper_01)     # 0=张开, 1=闭合；width = 0.09 * (1 -
 ```bash
 python examples/teleop_panda.py --calib configs/panda_calib.json
 ```
+
+### 5. 直接用 ROS1 + MoveIt 控制 Franka（开箱即用）
+
+`examples/teleop_panda_ros1_moveit.py` 已经把 Panda 接口实现为 ROS1 版本：机械臂通过
+MoveIt 所管理的控制器下发，夹爪通过 `franka_gripper` 的 action 控制。
+
+**额外依赖**（来自 ROS 环境，不在 `requirements.txt`）：
+`rospy`、`actionlib`、`moveit_commander`（仅 `--mode moveit` 需要）、
+`control_msgs`、`trajectory_msgs`、`sensor_msgs`、`franka_gripper`。
+运行前先 `source /opt/ros/<distro>/setup.bash` 和你的 catkin 工作空间 `setup.bash`。
+
+先在其他终端启动机器人与 MoveIt（示例，按你的实际 launch 调整）：
+
+```bash
+roslaunch franka_control franka_control.launch robot_ip:=<机器人IP>
+roslaunch panda_moveit_config <你的moveit>.launch        # 启动 MoveIt + 关节轨迹控制器
+roslaunch franka_gripper franka_gripper.launch robot_ip:=<机器人IP>
+```
+
+然后运行遥操作脚本：
+
+```bash
+# 推荐：trajectory 模式，平滑连续跟随（直接给 MoveIt 管理的关节轨迹控制器发单点目标）
+python examples/teleop_panda_ros1_moveit.py --calib configs/panda_calib.json \
+  --mode trajectory --hz 50 --gripper-hz 1
+
+# 或：moveit 模式，每周期用 moveit_commander 规划并执行（更安全但偏顿，建议降频）
+python examples/teleop_panda_ros1_moveit.py --calib configs/panda_calib.json \
+  --mode moveit --hz 8
+```
+
+常用参数：
+
+- `--mode {trajectory,moveit}`：机械臂下发方式（见上）。
+- `--arm-id panda`：关节命名前缀（`panda` / `fr3` …）。
+- `--move-group panda_arm`：MoveIt 规划组（`moveit` 模式）。
+- `--traj-action`：`trajectory` 模式的 action 名，默认
+  `/position_joint_trajectory_controller/follow_joint_trajectory`（用 effort 控制器时改成
+  `/effort_joint_trajectory_controller/...`）。
+- `--gripper-mode {move,grasp,none}`：夹爪连续跟随用 `move`，带力抓取用 `grasp`。
+- `--hz` / `--gripper-hz`：机械臂与夹爪控制频率（默认 50 Hz / 1 Hz，相互独立）。
+- `--max-delta`：每步单关节最大变化(rad)，限制跳变。
+- `--max-start-delta`：主/从起始差异过大则拒绝启动（安全）。
 
 ## 在你自己的代码里直接调用
 
